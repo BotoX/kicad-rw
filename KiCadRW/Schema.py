@@ -186,6 +186,8 @@ class SymbolLib(NameMixin):
 
 class Symbol(PositionAngle):
 
+    _logger = _module_logger.getChild("Wire")
+
     ##############################################
 
     def __init__(self, lib,
@@ -293,14 +295,22 @@ class Symbol(PositionAngle):
 
     ##############################################
 
-    def guess_netlist(self, wires):
+    def guess_netlist(self, wires, labels, no_connections):
         for pin in self._lib.pins:
             pin_position = self._pin_position(pin)
             for wire in wires:
                 if wire.match_pin(pin_position):
                     pin_position.net_id = wire.net_id
             if pin_position.net_id is None:
-                self._logger.warning("Net not found")
+                for label in labels:
+                    if Position.__eq__(label, pin_position):
+                        pin_position.net_id = NetId.get_or_create(label.name)
+            if pin_position.net_id is None:
+                for nocon in no_connections:
+                    if Position.__eq__(nocon, pin_position):
+                        pin_position.net_id = NetId.get_or_create('#NO_CONNECT')
+            if pin_position.net_id is None:
+                self._logger.warning(f"Net not found {pin} - {pin_position}")
             self._pins.append(pin_position)
 
 ####################################################################################################
@@ -518,6 +528,14 @@ class NetId:
                 cls.MAP[_id] = net_id._uuid
                 _id += 1
 
+    @classmethod
+    def get_or_create(cls, net_id):
+        if net_id in cls.MAP:
+            return cls.NETS[cls.MAP[net_id] - 1]
+        net = cls()
+        net.id = net_id
+        return net
+
     ##############################################
 
     def __init__(self):
@@ -674,7 +692,7 @@ class KiCadSchema(Sexpression):
             elif _car_value == 'no_connect':
                 # (no_connect (at 177.8 50.8) (uuid b47f754e-304e-4f98-968e-20e5e5d18e29))
                 _, d = self.to_dict(sexpr)
-                no_connection = NoConnection(*d['at'])
+                no_connection = NoConnect(*d['at'])
                 self._no_connections.append(no_connection)
 
             elif _car_value == 'bus_entry':
@@ -729,7 +747,8 @@ class KiCadSchema(Sexpression):
                 # )
                 _, d = self.to_dict(sexpr)
                 name = self.sattr(d)
-                global_label = GlobalLabel(name, *d['at'])
+                at = d['at'][:2]
+                global_label = GlobalLabel(name, *at)
                 self._global_labels.append(global_label)
 
             elif _car_value == 'hierarchical_label':
@@ -739,7 +758,8 @@ class KiCadSchema(Sexpression):
                 # )
                 _, d = self.to_dict(sexpr)
                 name = self.sattr(d)
-                hierarchical_label = HierarchicalLabel(name, *d['at'])
+                at = d['at'][:2]
+                hierarchical_label = HierarchicalLabel(name, *at)
                 self._hierarchical_labels.append(hierarchical_label)
 
             elif _car_value == 'symbol':
@@ -933,7 +953,7 @@ class KiCadSchema(Sexpression):
 
         # Assign a net to pins
         for symbol in self._symbols:
-            symbol.guess_netlist(self._wires)
+            symbol.guess_netlist(self._wires, self._labels + self._global_labels + self._hierarchical_labels, self._no_connections)
 
         # Find the ground
         for symbol in self._symbols:
@@ -941,8 +961,8 @@ class KiCadSchema(Sexpression):
                 symbol.first_pin.net_id.id = 0
 
         # Use wire labels as ids
-        for label in self._labels:
-            if label.name and label.wires:
+        for label in self._labels + self._global_labels + self._hierarchical_labels:
+            if label.name and label._wires:
                 wire = next(label.wires)
                 wire.net_id.id = label.name
 
